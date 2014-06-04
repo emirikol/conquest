@@ -1,0 +1,121 @@
+<html>
+<head>
+<meta property="og:title" content="Conquest - A strategy game" />
+<meta property="og:type" content="game" />
+<meta property="og:url" content="http://tagz.heroku.com/lobby" />
+<meta property="og:image" content="" />
+<meta property="og:site_name" content="Conquest" />
+<meta property="fb:admins" content="690782893" />
+<script src="/js/jquery-1.5.2.min.js"></script>
+<script src="/js/jquery-ui-1.8.15.custom.min.js"></script>
+<script src="http://js.pusherapp.com/1.9/pusher.min.js"></script>
+<script>
+
+    function uuid() {
+      var S4 = function() {
+         return (((1+Math.random())*0x10000)|0).toString(16).substring(1);
+      };
+      return (S4()+S4()+"-"+S4()+"-"+S4()+"-"+S4()+"-"+S4()+S4()+S4());
+    }
+	
+    Pusher.log = function(message) {
+      if (window.console && window.console.log) window.console.log(message);
+    };
+    WEB_SOCKET_DEBUG = true;
+    var pusher = new Pusher('f46e19fb4871e918a977');
+    var uid = uuid();
+	
+	
+	lobby = pusher.subscribe('lobby');
+	lobby.pusher.connection.bind('connected', function() {
+	  	$.post('/push', {c: 'lobby', e: 'list', d:{ }, socket_id: lobby.pusher.connection.socket_id  });
+	});
+	
+	function desc(listing) {
+		listing.find('h4').click(function(ev) {
+		  $(this).parent('.listing').find('.desc').toggle();
+		});
+	}
+	
+	lobby.bind('response', function(data) {
+	  var game = data.game_id;
+		var variant = {name: "Conquest", description:"An original board game. alpha version."};
+		var listing = $('<div id="'+game+'" class="listing"></div>').
+		  append('<h4 class="type">Game Type: '+variant.name+' Name: '+data.nickname+'</h4>' + '<div class="desc">'+variant.description+'</div>').
+		  data('variant', data.game_type)
+		if(data.free) {
+		  listing.append('<a href="#"class="join" game="'+game+'">Join</a>');
+		} else {
+			listing.append('<a class="watch" game="'+game+'">Spectate</a>');
+		}
+		listing.find('a.join').click(function(){  
+		  join_game($(this).attr('game'));
+		});
+		desc(listing);
+		var place = data.free ? '#available' : '#running';
+		$('#'+game).replaceWith(listing).appendTo($(place));
+		if(!$('#'+game).size() > 0) listing.appendTo($(place));
+	});
+	
+  game_channel = {name: 'none'};
+	function join_game(game_id) {
+	  name = 'game' + game_id;
+	  if(game_channel.name != name) game_channel =  pusher.subscribe(name);
+		$.post('/push', {c: name, e: 'join', d:{ id: uid}, socket_id: game_channel.pusher.connection.socket_id  });
+		game_channel.bind('ok', function(data) {
+		  if(data.responding_to == uid) {
+              window.location = '/conquest?game_id='+game_id
+			} else {
+			  alert('sorry, the game has filled up');
+				game_channel.unsubscribe(name);
+			}
+		});
+	}
+		
+</script>
+<style>
+body { 
+		background-color:#f5f5f5;
+		border-left: 90px solid black;
+		border-right: 90px solid black; 
+		padding:50px;
+		margin: 0;
+		height:100%;
+  }
+	
+	.listing {
+	  border: 1px solid black;
+		padding: 5px;
+		width: 300px;
+	}
+	h4 {
+	  margin: 2px;
+	}
+	.desc {
+	  display: none;
+	}
+</style>
+</head>
+<body>
+<h1 id="status">Idle</h1>
+<h2>Available Games</h2>
+<div id="available">
+
+</div>
+<a href="/conquest" id="new">New Game</a><br />
+<!--
+<a href="http://twitter.com/tagzdev" class="twitter-follow-button" data-show-count="false">Follow @tagzdev</a>
+<script src="http://platform.twitter.com/widgets.js" type="text/javascript"></script>
+<script type="text/javascript" src="https://apis.google.com/js/plusone.js"></script>
+<g:plusone></g:plusone>
+-->
+<h2>Full Games</h2>
+<div id="running">
+
+</div>
+
+<!--
+<div id="fb-root"></div><script src="http://connect.facebook.net/en_US/all.js#xfbml=1"></script><fb:comments href="tagz.heroku.com/lobby" num_posts="10" width="500"></fb:comments>
+-->
+</body>
+</html>

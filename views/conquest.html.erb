@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en">
+
+<head>
+<script src="/js/jquery-1.5.2.min.js"></script>
+<script src="/js/jquery-ui-1.8.15.custom.min.js"></script>
+<script src="http://js.pusherapp.com/1.9/pusher.min.js"></script>
+<script src="/js/conquest.js"></script>
+<link rel="stylesheet" type="text/css" href="css/smoothness/jquery-ui-1.8.15.custom.css" />
+
+<script type="text/javascript">
+<![CDATA[
+	function uuid() {
+    var S4 = function() {
+       return (((1+Math.random())*0x10000)|0).toString(16).substring(1);
+    };
+    return (S4()+S4()+"-"+S4()+"-"+S4()+"-"+S4()+"-"+S4()+S4()+S4());
+  } 
+
+	var pusher = new Pusher('f46e19fb4871e918a977');
+	var uid = uuid();
+	var oponent = null;
+	var status = 'unkown';
+	soldiers = [];
+	
+  <% if @new %>
+	player = 1;
+	other_player = 2;
+	var name = 'game' + uid;
+	channel = '';
+	lobby = '';
+	function start_game() {	
+	  channel = pusher.subscribe(name);
+	  lobby = pusher.subscribe('lobby');
+	  lobby.bind('list', function(data) { 
+	    $.post('/push', {c: 'lobby', e: 'response', d:{ game_id: uid, game_type: "Conquest", nickname: $('#nick').val(), free: status != 'player1' }, socket_id: lobby.pusher.connection.socket_id });
+	  });
+	  //lobby.pusher.connection.bind('connected', function() {
+	    $.post('/push', {c: 'lobby', e: 'response', d:{ game_id: uid, game_type: "Conquest", nickname: $('#nick').val(), free: true }, socket_id: lobby.pusher.connection.socket_id });
+		  $('#status').html('Waiting for player to join');
+	 // });
+	  channel.bind('join', function(data) {
+	    if(status == 'unkown') {
+        potential_op = data.id;
+				status = 'responding';
+				$('#status').html('Second Player is joining');
+			  $.post('/push', {c: name, e: 'ok', d:{ id: uid, responding_to: potential_op, game_type: "Conquest" }, socket_id: channel.pusher.connection.socket_id });
+			}
+	  });
+	  channel.bind('pong', function(data) {
+      if(status == 'responding') {
+				oponent = data.id;
+				$('#status').html('Second Player confirmed join');
+				status = 'player1';
+				init_game();
+				$('#settings').css({visibility: 'hidden'});
+				$('#end_turn').show();
+				connected();
+				$('#status').html('Phase: Upkeep');
+				$('#points').html(balance());
+				$('body').trigger('upkeep');
+			} else {
+				status = 'unkown'; // drop the ball since other player will pick it up   
+			}
+	  }); 
+	}
+	<% else %>
+	  start_game = false;
+	  player = 2;
+		other_player = 1;
+	  opopnent = '<%= @game_id %>';
+		(function() { $('#status').html('Connecting'); });
+	  var channel = pusher.subscribe('game' + '<%= @game_id %>');
+	  channel.pusher.connection.bind('connected', function() {
+	    //$.post('/push', {c: 'lobby', e: 'response', d:{ game_id: uid, game_type: 'rebellion', nickname: 'nick', free: true }, socket_id: lobby.pusher.connection.socket_id });
+			status = 'player2';
+			init_game();
+			$.post('/push', {c: channel.name, e: 'pong', d:{ id: uid }, socket_id: channel.pusher.connection.socket_id });
+			$(function() { $('#status').html('Waiting for first move'); });
+			connected();
+			$('.action').hide();
+			$('#settings').css({visibility: 'hidden'});
+	  });
+	
+	<% end %>
+	
+	function exec_serialized_moves(moves) {
+	$.each(moves, function(i, e) {
+			  var piece = e.piece ?  $('#'+e.piece): e.generate;
+				var target = $('[sid=' + e.target + ']');
+			  new Move(piece, target).make();
+			});
+	}
+	
+	
+	function connected() {
+	channel.bind('turn', function(data) {
+			phase = 'upkeep';
+			$('#status').html('your turn. Upkeep phase.');
+			exec_serialized_moves(data.moves);
+			points = 0;
+			$('#points').html(balance());
+			$('#end_turn').show();
+			show_actions(null);
+			$('body').trigger('upkeep');
+	});
+	
+	channel.bind('retreat', function(data) {
+	  console.info(data);
+	  var retreat_square = $('[sid='+data.to+']');
+		attacked_square.find('.soldier.'+other_player).each(function(i,e){
+			move_and_log($(e), retreat_square, 0);
+		});
+		kill_extra_pieces(retreat_square); //kill enemy citizens, own citizens and enemy soldiers until only pieces are left on  retreat square
+		$('#block').hide();
+    attack_resolved();
+	});
+	channel.bind('attack', function(data) {
+		exec_serialized_moves(data.moves);
+		$('#status').html('Attacked!, select retreat square');
+		$.each(data.to, function(i,e) {
+		  var retreat_square = $('[sid='+e+']');
+		  $("<button class='retreat_action'>" + retreat_square.attr('sid').toUpperCase() + "</button>").appendTo($('#options')).click(function(ev) {
+			   $.post('/push', {c: channel.name, e: 'retreat', d:{ to: retreat_square.attr('sid') }, socket_id: channel.pusher.connection.socket_id }); 
+				 $('.retreat_action').remove();
+				 $('.square').removeClass('movable');
+				 $('#status').html('Waiting for next move');
+			}).hover(function(){ retreat_square.addClass('movable') }, function(){ retreat_square.removeClass('movable') });
+		});
+	});
+	}
+	function prune_moves() {
+	  // delete any occurences of the move except the last one
+		return moves;
+	}
+	
+	function send_moves() {
+	  serialized_moves = $.map(moves, function(m, i) {
+		  return m.for_send();
+		});
+	  $.post('/push', {c: channel.name, e: 'turn', d:{ moves: serialized_moves}, socket_id: channel.pusher.connection.socket_id });
+		moves = [];
+	}
+	
+	function end_turn() {
+	  send_moves(prune_moves()); // socket_id and serialized moves
+		$('.piece').draggable('option','disabled',true);
+		$('#end_turn').hide();
+		$('.action').hide();
+		var won = $('.piece.'+other_player).size() == 0
+		if(won) {
+		 $('#status').html('Hail the conquering hero!');
+		} else {
+		  $('#status').html('Waiting for next move');
+		  $('body').trigger('end_turn');
+		}
+	}
+	 
+	Move = function(piece, target, cost) {
+	  var orig_piece = piece;
+	  if (typeof(piece) == 'string') piece = generate_piece(piece, 'a');
+		var source = piece[0].source();
+	  this.init({piece: piece, target : target, source : source, cost: cost, orig_piece: orig_piece});
+	};
+	$.extend(Move.prototype, {
+	init: function (obj) {
+	  this.self = obj;
+	},
+	make: function() {
+	  var self = this.self;
+		var piece = self.piece;
+	  $(self.target).append(self.piece.css({top: 0, left:0}));
+		self.piece[0].moved = true;
+		points -= self.cost;
+		$('body').trigger('move', this);
+		$('#points').html(points);
+	},
+	reverse: function() {
+	  var self = this.self;
+		this.self = {piece: self.piece, target : self.source, source : self.target, cost: -self.cost};
+		return this
+	},
+	for_send: function() {
+	  var self = this.self;
+		if(typeof(self.orig_piece) == 'string')  return {generate: self.orig_piece, target: $(self.target).attr('sid')} ;
+	  return {piece: self.piece.attr('id'), target: $(self.target).attr('sid')} ;
+	}, 
+	get_piece: function() {
+	  return this.self.piece[0].piece;
+	}
+	});
+	
+var moves = []; 
+ var pid = 0;
+	function generate_piece(player_type, sq) {
+	 var player = player_type[0];
+	 var type = player_type.split(/\d/)[1];
+	 var piece = $($('<img></img>').appendTo(
+	   $('.square'+attrs_to_css({sid: sq}))
+		).
+		attr('src', "/pieces/"+player+type+".png").
+		addClass(type).
+		addClass("piece").
+		addClass(player).
+		css({top: 0, left:0}).
+		attr('id', 'pid' + pid).
+		data('moved', false)).
+		  draggable({disabled: true ,revert : 'invalid'});
+		piece[0].__proto__ = clone(piece[0].__proto__,pieces[type]);
+		piece[0].init($(piece[0]));
+		pid += 1;
+		return piece;
+	}
+	
+	function log_move(move) {
+	  moves.push(move)
+	}
+	
+	function gen_and_log(piece, target, cost) {
+		var move =  new Move(piece, target, cost)
+		move.make();
+		log_move(move);
+	};
+	
+	function move_and_log(piece, target, cost) {
+	  cost =typeof(cost) == 'undefined' ? piece[0].move_cost() : cost
+		var move =  new Move(piece, target, cost)
+		move.make();
+		log_move(move);
+	};
+	
+	function undo() {
+	  move = moves.pop();
+		move.reverse().make();
+	}
+	
+	function init_game() {
+	  points = 0;
+		phase = 'upkeep';
+		$('#options').show();
+		show_actions(null);
+	  $('#board').bind('dragstart', function(event, ui){
+		  var victim = event.target;
+		  victim.mark_moves();
+			$(victim).trigger('mark_move.var', event);
+			//alert('bar');
+		});
+		$('#board').bind('dragstop', function(event, ui){
+		  $('.square').removeClass('movable').removeClass('edible');
+			$('#status').html('Phase: '+phase_names[phase])
+			//alert('foo');
+		});
+		generate_piece('1citizen','a');
+		generate_piece('1citizen','a');
+		generate_piece('1citizen','a');
+		generate_piece('1soldier','a');
+	  generate_piece('2citizen','j');
+		generate_piece('2citizen','j');
+		generate_piece('2citizen','j');
+		generate_piece('2soldier','j');
+		
+		/*generate_piece('2soldier','m');
+    generate_piece('2soldier','m');
+		generate_piece('2soldier','m');
+		generate_piece('2soldier','m');
+		generate_piece('2soldier','m');*/
+/*		generate_piece('1soldier','l');
+		generate_piece('1soldier','l');
+		generate_piece('1citizen','l');*/
+		/*generate_piece('1citizen','l');
+		generate_piece('1citizen','l');
+		generate_piece('1citizen','l');*/
+		
+	}
+	
+	selected = null;
+	function show_actions(target) {
+		$('#pcost').html(citizen_cost())
+	  selected = target;
+	  $.each(actions, function(i, action) {
+		  if(action.show_for(selected)) {
+			  action.button.show();
+			} else {
+			  action.button.hide();
+			}
+		});
+	}
+	 $(function() {
+	 $('rect').each(function(i,e) {
+	  var pos = $(e).offset();
+		pos.left += 90;
+		pos.position = 'absolute';
+		$('<div></div>').appendTo('#board').css(pos).addClass('square').attr('sid', $(e).attr('id'));
+	 });
+	 $(".square").droppable({
+		  accept: function(x, ui) {
+			  var res = $(this).hasClass('movable');
+			  return res
+			},
+      drop: function(ev, ui) {
+			   $('.square').removeClass('movable').removeClass('edible');
+			  var piece = ui.draggable[0];
+			  move_and_log(ui.draggable, this);
+				piece.after_move();
+				show_actions(ui.draggable);
+			}			
+		}).each(function(i,e) {
+		  e.edible = function() { return $(this).find('.piece')  };
+      e.adj = function() { return $.map(squares[$(this).attr('sid')].lines, function(e, i) { return $('[sid=' + e + ']')[0] }) };
+			e.has_free_citizen = function() {  return $(e).find('.citizen.'+player).size() > 0 && (!($(e).find('.soldier')[0] && $(e).find('.soldier')[0].player != player))  }  
+		});
+		
+		$('#end_turn').click(end_turn);
+			$('#undo').click(undo);
+		if(start_game) $('#new').click(start_game);
+		
+		$('#board').click(function(ev){
+		  show_actions($(ev.target));
+		});
+		
+			}); 
+]]>
+</script>
+
+<style>
+body { 
+		background-color:#f5f5f5;
+		border-left: 90px solid black;
+		border-right: 90px solid black; 
+		padding:50px;
+		margin: 0;
+		height:100%;
+		min-height: 600px;
+  }
+	#chessboard {
+	  float: left;
+		margin-right: 50px;
+	}
+	#other {
+	  float: left;
+		margin-right: 50px;
+	}
+	.square {
+	  float: left;
+		width: 50px;
+		height:50px;
+		display:inline
+	}
+	.piece {
+	  width:16px;
+		height:16px;
+		z-index: 100;
+	}
+	#graveyard {
+	  display:none;
+	}
+	#end_turn {
+	  display: none;
+	}
+	.movable {
+	  background-color: #e3e051;
+	}
+	#board {
+	  float: left;
+	}
+	#options {
+	  float: left;
+	  width: 150px;
+		display: none;
+	}
+	#options button {
+	  display: block;
+	}
+	#info {
+	  float: left;
+		max-width: 300px;
+	}
+	#block {
+		background-color: rgba(172, 172, 172, 0.7255);
+		height: 100%;
+		left: 0px;
+		position: fixed;
+		top: 0px;
+		width: 120%;
+		z-index: 9990;
+		display:none;
+	}
+	.ui-state-disabled {
+	  opacity: 1;
+	}
+</style>
+</head>
+<body>
+
+
+<div id="block"></div>
+<h1 id="status">Idle</h1>
+<div id="settings">
+<label for="nick">Game Name:</label>
+<input id="nick" type="textfield" /> <br />
+<button id="new">Open Game</button>
+</div>
+<div id="gameArea">
+<div>Points: <span id="points">0</span> Current procreation cost: <span id="pcost">0</span></div>
+
+
+<div id="board">
+<svg width="600" height="300" xmlns="http://www.w3.org/2000/svg" xmlns:se="http://svg-edit.googlecode.com">
+ <g>
+  <polyline se:connector="svg_9 svg_7" fill="none" stroke-width="5" stroke="#000000" points="278.5 145.83 296.5 157.5 314.5 169.17" id="svg_40"/>
+  <polyline se:connector="svg_36 svg_10" fill="none" stroke-width="5" stroke="#000000" points="311.5 250.034 295.5 239 279.5 227.966" id="svg_39"/>
+  <polyline se:connector="svg_36 svg_7" fill="none" stroke-width="5" stroke="#000000" points="340.006 241.5 340.5 228 340.994 214.5" id="svg_38"/>
+  <polyline se:connector="svg_4 svg_36" fill="none" stroke-width="5" stroke="#000000" points="420.5 197.968 393.5 221.5 366.5 245.032" id="svg_37"/>
+  <polyline se:connector="svg_7 svg_6" fill="none" stroke-width="5" stroke="#000000" points="342 159.5 342 149 342 138.5" id="svg_35"/>
+  <polyline se:connector="svg_10 svg_7" fill="none" stroke-width="5" stroke="#000000" points="279.5 202.278 297 198 314.5 193.722" id="svg_34"/>
+  <polyline se:connector="svg_8 svg_9" fill="none" stroke-width="5" stroke="#000000" points="249.764 83.5 250 92 250.236 100.5" id="svg_33"/>
+  <polyline se:connector="svg_13 svg_10" fill="none" stroke-width="5" stroke="#000000" points="180.5 207.556 202.5 208 224.5 208.444" id="svg_32"/>
+  <polyline se:connector="svg_12 svg_9" fill="none" stroke-width="5" stroke="#000000" points="183.5 129.421 203.5 129 223.5 128.579" id="svg_31"/>
+  <polyline se:connector="svg_11 svg_9" fill="none" stroke-width="5" stroke="#000000" points="187.5 80.5495 205.5 94 223.5 107.451" id="svg_30"/>
+  <polyline se:connector="svg_11 svg_8" fill="none" stroke-width="5" stroke="#000000" points="187.5 58.764 204.5 58 221.5 57.236" id="svg_29"/>
+  <polyline se:connector="svg_12 svg_13" fill="none" stroke-width="5" stroke="#000000" points="154.929 157.5 154.5 168.5 154.071 179.5" id="svg_28"/>
+  <polyline se:connector="svg_12 svg_11" fill="none" stroke-width="5" stroke="#000000" points="157.571 102.5 158 95 158.429 87.5" id="svg_27"/>
+  <polyline se:connector="svg_14 svg_12" fill="none" stroke-width="5" stroke="#000000" points="91.5 130.701 110 130.5 128.5 130.299" id="svg_26"/>
+  <polyline se:connector="svg_9 svg_10" fill="none" stroke-width="5" stroke="#000000" points="251.34 155.5 251.5 168.5 251.66 181.5" id="svg_25"/>
+  <polyline se:connector="svg_3 svg_6" fill="none" stroke-width="5" stroke="#000000" points="420.5 80.6368 395 90.5 369.5 100.363" id="svg_22"/>
+  <polyline se:connector="svg_6 svg_8" fill="none" stroke-width="5" stroke="#000000" points="314.5 94.7366 295.5 83.5 276.5 72.2634" id="svg_21"/>
+  <polyline se:connector="svg_5 svg_8" fill="none" stroke-width="5" stroke="#000000" points="311.5 38.6389 294 43.5 276.5 48.3611" id="svg_20"/>
+  <polyline se:connector="svg_4 svg_6" fill="none" stroke-width="5" stroke="#000000" points="420.5 157.656 395 142.5 369.5 127.344" id="svg_18"/>
+  <polyline se:connector="svg_3 svg_5" fill="none" stroke-width="5" stroke="#000000" points="420.5 60.1605 393.5 50.5 366.5 40.8395" id="svg_17"/>
+  <polyline se:connector="svg_1 svg_4" fill="none" stroke-width="5" stroke="#000000" points="504.5 131.625 490 142.5 475.5 153.375" id="svg_16"/>
+  <polyline se:connector="svg_1 svg_3" fill="none" stroke-width="5" stroke="#000000" points="504.5 97.5774 490 90.5 475.5 83.4226" id="svg_15"/>
+  <rect rx="9" ry="9" id="a" x="507" y="86" width="50" height="50" stroke-width="4" stroke="#000000" fill="#FFFFFF"/>
+  <rect rx="9" ry="9" id="b" x="423" y="45" width="50" height="50" stroke-width="4" stroke="#000000" fill="#FFFFFF"/>
+  <rect rx="9" ry="9" id="e" x="423" y="149" width="50" height="50" stroke-width="4" stroke="#000000" fill="#FFFFFF"/>
+  <rect rx="9" ry="9" id="c" x="314" y="6" width="50" height="50" stroke-width="4" stroke="#000000" fill="#FFFFFF"/>
+  <rect rx="9" ry="9" id="d" x="317" y="86" width="50" height="50" stroke-width="4" stroke="#000000" fill="#FFFFFF"/>
+  <rect rx="9" ry="9" id="g" x="317" y="162" width="50" height="50" stroke-width="4" stroke="#000000" fill="#FFFFFF"/>
+  <rect rx="9" ry="9" id="h" x="224" y="31" width="50" height="50" stroke-width="4" stroke="#000000" fill="#FFFFFF"/>
+  <rect rx="9" ry="9" id="n" x="226" y="103" width="50" height="50" stroke-width="4" stroke="#000000" fill="#FFFFFF"/>
+  <rect rx="9" ry="9" id="k" x="227" y="184" width="50" height="50" stroke-width="4" stroke="#000000" fill="#FFFFFF"/>
+  <rect rx="9" ry="9" id="i" x="135" y="35" width="50" height="50" stroke-width="4" stroke="#000000" fill="#FFFFFF"/>
+	<rect rx="9" ry="9" id="j" x="131" y="105" width="50" height="50" stroke-width="4" stroke="#000000" fill="#FFFFFF"/>
+  <rect rx="9" ry="9" id="l" x="128" y="182" width="50" height="50" stroke-width="4" stroke="#000000" fill="#FFFFFF"/>
+  <rect ry="9" rx="9" id="m" x="39" y="106" width="50" height="50" stroke-width="4" stroke="#000000" fill="#FFFFFF"/>
+  <rect rx="9" id="f" ry="9" x="314" y="244" width="50" height="50" stroke-width="4" stroke="#000000" fill="#FFFFFF"/>
+ </g>
+</svg>
+
+</div>
+<div id="options">
+Actions:
+<!--<button id="undo">Undo</button>
+<button id="test" onclick="init_game()">Test</button> -->
+<button id="end_turn">End Turn</button>
+</div>
+<div id="other">
+<div id="graveyard" sid="graveyard">
+</div>
+</div>
+<div id="info">
+  Rules: <br/>
+	<p><b>Conquest:</b> a turn based strategy game</p>
+	<p><b>Goal:</b> destroy all enemy pieces.</p>
+	<p><b>Rules:</b>
+	  <ul>
+			 <li>Citizen: <img src="/pieces/1citizen.png"></img></li>
+	      <li>Soldier: <img src="/pieces/1soldier.png"></img></li>
+		   <li>You may not have more than 5 pieces in the same square.</li>
+			 <li>Moving a soldier to a full square will kill a citizen in that square.</li>
+			 <li>You may not move a piece to a square occupied by an enemy soldier</li>
+			 <li>Citizens sharing a square with an enemy soldier are considered "conqured"</li>
+		 </ul>
+	</p>
+	<p><b>Actions:</b>
+	   <ul>
+		   <li>Disband: at any point in your turn you may select one of your soldiers and turn it to a citizen.</li>
+			 <li>Next Phase</li>
+			 <li>End Turn</li>
+		 </ul>
+	</p>
+	<p>
+	<b>Phases:</b>
+	   <ul>
+		   <li> <b>Upkeep:</b> automatically gain 1 point for each unconqured citizens and pay one point for each soldier. if you have zero or less points you will be allowed to disband soldiers before continuing </li>
+			 <li> <b>Move Soliders:</b> cost equals to distance to closest unconqured citizen plus one. you may attack during this phase <br/>
+			 <b>Pacify:</b> pay 1 point to eliminate a conqured citizen</li>
+			 <li><b>Recruit:</b> pay 2 points to recruit a citizen to become a soldier</li>
+			 <li><b>Citizen Movement:</b> 1 point per move.</li>
+			 <li><b>Procreate:</b> once for each square containing two or more citizens, create a new citizens. costs the diffrence between the number of your game pieces and the opponent's plus 1, with a minimum of 1</li>
+		 </ul>
+	</p>
+	<p><b>Attack:</b> you may attack a square if the number of attackers is greater than that of the defenders (citizens break ties). to attack, select square, press "attack", select attackers,
+	pressed "commit attack". cost of attack is the cost of movement of attackers to the square. after the attack is commited, opponent will choose a retreat square. any pieces above 5 in the retreat or attacked square will be 
+	destroyed in the following order: opponent citizens, your citizens, opponent soldiers, your soldiers.</p>
+	<p>if the defender has nowhere to retreat, the defending soldiers will be eliminated</p>
+	<p><b>Retreat:</b> if you are attacked you will have to choose a retreat square, the options will appear to the right of the board, you may not retreat to a square containing an enemy soldier, you may not retreat to a square from which you have been attacked and you may not retreat to a square where the enemy has more unconquered citizens than you</p>
+</div>
+</div>
+</body>
+
+</html>
